@@ -68,16 +68,32 @@ pivot_root_setup() {
 do_run() {
   bootstrap_rootfs
 
-  subuid_id=$(cat /etc/subuid | grep "^$USER:" | cut -d: -f1)
-  subuid_count=$(cat /etc/subuid | grep "^$USER:" | cut -d: -f2)
-  subgid_id=$(cat /etc/subgid | grep "^$USER:" | cut -d: -f1)
-  subgid_count=$(cat /etc/subgid | grep "^$USER:" | cut -d: -f2)
+  subuid_id=$(cat /etc/subuid | grep "^$USER:" | cut -d: -f2)
+  subuid_count=$(cat /etc/subuid | grep "^$USER:" | cut -d: -f3)
+  subgid_id=$(cat /etc/subgid | grep "^$USER:" | cut -d: -f2)
+  subgid_count=$(cat /etc/subgid | grep "^$USER:" | cut -d: -f3)
+
+  if [[ -z "$subuid_id" || -z "$subgid_id" ]]; then
+    echo "[!] No /etc/subuid or /etc/subgid entry for $(id -un) — add one first." >&2
+    exit 1
+  fi
 
   echo "[*] Starting the container $CONTAINER_NAME"
-  exec unshare --mount --pid --fork --mount-proc --ipc -C -n -u --map-users="$USER_ID",0,1 --map-users="$subuid_id",1,"$subuid_count" --map-groups="$GROUP_ID",0,1 --map-groups="$subgid_id",1,"$subgid_count" "$0" ns_init "$CONTAINER_NAME"
+  network_ready="$CONTAINER_DIR/network-ready" # synchronization file
+  rm -f "$network_ready"
+  unshare --mount --pid --fork --mount-proc --ipc -C -n -u --map-users="$USER_ID",0,1 --map-users="$subuid_id",1,"$subuid_count" --map-groups="$GROUP_ID",0,1 --map-groups="$subgid_id",1,"$subgid_count" "$0" ns_init "$CONTAINER_NAME" &
+
+  container_pid=$!
+  echo "[*] Container PID: $container_pid"
+  setup_container_network "$container_pid"
+  touch "$network_ready"
+  wait "$container_pid"
 }
 
 ns_init() {
+  local network_ready="$CONTAINER_DIR/network-ready"
+  #local network_ready="$3"
+
   echo "[*] Setting up rootfs"
 
   mount --make-rprivate /
@@ -86,29 +102,59 @@ ns_init() {
 
   mkdir -p ./oldroot
   pivot_root . ./oldroot
+
+  export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  hash -r
+
   umount -l /oldroot
   rmdir /oldroot
 
-  mount -t proc proc /proc
-  mount -t sysfs sys /sys
+  #mount -t proc proc /proc
+  #mount -t sysfs sys /sys
 
-  mkdir -p /dev/pts /dev/shm
-  mount -t tmpfs tmpfs /dev
-  mount -t devpts devpts /dev/pts
-  mount -t tmpfs tmpfs /dev/shm
+  #mount -t tmpfs tmpfs /dev
+  #mkdir -p /dev/pts /dev/shm
+  #mount -t devpts devpts /dev/pts
+  #mount -t tmpfs tmpfs /dev/shm
 
-  mknod -m 666 /dev/null c 1 3
-  mknod -m 666 /dev/zero c 1 5
-  mknod -m 666 /dev/random c 1 8
-  mknod -m 666 /dev/urandom c 1 9
-  mknod -m 666 /dev/tty c 5 0
-  ln -sf /proc/self/fd /dev/fd
+  #mknod -m 666 /dev/null c 1 3
+  #mknod -m 666 /dev/zero c 1 5
+  #mknod -m 666 /dev/random c 1 8
+  #mknod -m 666 /dev/urandom c 1 9
+  #mknod -m 666 /dev/tty c 5 0
+  #ln -sf /proc/self/fd /dev/fd
 
-  export PATH="/bin:/sbin:/usr/sbin:$PATH"
+  echo "[*] Waiting for network"
+  while [[ ! -f "$network_ready" ]]; do
+    sleep 0.1
+  done
+
   export HOME=/root
 
   echo "[*] Dropping into shell"
   exec /bin/sh
+}
+
+setup_container_network() {
+  local pid="$1"
+  local veth="conveth-$CONTAINER_NAME"
+  local vethBr="conbr-$CONTAINER_NAME"
+
+  echo "[*] Creating veth pair"
+  sudo ip link add name "$veth" type veth peer name "$vethBr"
+
+  echo "[*] Connecting host side to $BRIDGE"
+  sudo ip link set "$vethBr" master "$BRIDGE"
+  sudo ip link set "$vethBr" up
+
+  echo "[*] Moving container side into network namespace $pid"
+  sudo ip link set "$veth" netns "$pid"
+
+  echo "[*] Configuring container network"
+  sudo nsenter -t "$pid" -n ip addr add 10.0.0.2/24 dev "$veth"
+  sudo nsenter -t "$pid" -n ip link set "$veth" up
+  sudo nsenter -t "$pid" -n ip link set lo up
+  sudo nsenter -t "$pid" -n ip route add default via 10.0.0.1
 }
 
 case "$ACTION" in
@@ -120,7 +166,7 @@ run)
   do_run
   ;;
 ns_init)
-  ns_init
+  ns_init "$@"
   ;;
 *)
   usage
