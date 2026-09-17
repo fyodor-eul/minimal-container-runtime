@@ -218,7 +218,7 @@ do_remove() {
     fi
   fi
 
-  # Removing the veth paris
+  # Removing the veth pairs
   local veth="conveth-$CONTAINER_NAME"
   if ip link show "$veth" &>/dev/null; then
     echo "[*] Removing veth $veth"
@@ -231,6 +231,7 @@ do_remove() {
     sudo umount -Rl "$ROOTFS" 2>/dev/null || true
   fi
 
+  # Remove container directory
   if [[ -d "$CONTAINER_DIR" ]]; then
     echo "[*] Deleting $CONTAINER_DIR"
     sudo rm -rf "$CONTAINER_DIR"
