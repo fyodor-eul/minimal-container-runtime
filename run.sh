@@ -74,25 +74,34 @@ do_run() {
   subgid_count=$(cat /etc/subgid | grep "^$USER:" | cut -d: -f3)
 
   if [[ -z "$subuid_id" || -z "$subgid_id" ]]; then
-    echo "[!] No /etc/subuid or /etc/subgid entry for $(id -un) — add one first." >&2
+    echo "[!] No /etc/subuid or /etc/subgid entry for $(id -un). Add one first." >&2
     exit 1
   fi
 
   echo "[*] Starting the container $CONTAINER_NAME"
   network_ready="$CONTAINER_DIR/network-ready" # synchronization file
   rm -f "$network_ready"
-  unshare --mount --pid --fork --mount-proc --ipc -C -n -u --map-users="$USER_ID",0,1 --map-users="$subuid_id",1,"$subuid_count" --map-groups="$GROUP_ID",0,1 --map-groups="$subgid_id",1,"$subgid_count" "$0" ns_init "$CONTAINER_NAME" &
+
+  set -m
+
+  unshare --mount --pid --fork --mount-proc --ipc -C -n -u --map-users="$USER_ID",0,1 --map-users="$subuid_id",1,"$subuid_count" --map-groups="$GROUP_ID",0,1 --map-groups="$subgid_id",1,"$subgid_count" "$0" ns_init "$CONTAINER_NAME" "$network_ready" &
 
   container_pid=$!
   echo "[*] Container PID: $container_pid"
   setup_container_network "$container_pid"
   touch "$network_ready"
-  wait "$container_pid"
+  fg %1
+  #wait "$container_pid"
 }
 
 ns_init() {
-  local network_ready="$CONTAINER_DIR/network-ready"
-  #local network_ready="$3"
+  #local network_ready="$CONTAINER_DIR/network-ready"
+  local network_ready="$3"
+
+  echo "[*] Waiting for network"
+  while [[ ! -f "$network_ready" ]]; do
+    sleep 0.1
+  done
 
   echo "[*] Setting up rootfs"
 
@@ -124,11 +133,6 @@ ns_init() {
   #mknod -m 666 /dev/tty c 5 0
   #ln -sf /proc/self/fd /dev/fd
 
-  echo "[*] Waiting for network"
-  while [[ ! -f "$network_ready" ]]; do
-    sleep 0.1
-  done
-
   export HOME=/root
 
   echo "[*] Dropping into shell"
@@ -151,10 +155,21 @@ setup_container_network() {
   sudo ip link set "$veth" netns "$pid"
 
   echo "[*] Configuring container network"
+  echo "[1] Adding IP"
   sudo nsenter -t "$pid" -n ip addr add 10.0.0.2/24 dev "$veth"
+  echo "[1] Done"
+
+  echo "[2] Bringing veth up"
   sudo nsenter -t "$pid" -n ip link set "$veth" up
+  echo "[2] Done"
+
+  echo "[3] Bringing loopback up"
   sudo nsenter -t "$pid" -n ip link set lo up
+  echo "[3] Done"
+
+  echo "[4] Adding default route"
   sudo nsenter -t "$pid" -n ip route add default via 10.0.0.1
+  echo "[4] Done"
 }
 
 case "$ACTION" in
