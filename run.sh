@@ -84,7 +84,7 @@ do_run() {
 
   set -m
 
-  unshare --mount --pid --fork --mount-proc --ipc -C -n -u --map-users="$USER_ID",0,1 --map-users="$subuid_id",1,"$subuid_count" --map-groups="$GROUP_ID",0,1 --map-groups="$subgid_id",1,"$subgid_count" "$0" ns_init "$CONTAINER_NAME" "$network_ready" &
+  unshare --mount --pid --fork --mount-proc --ipc -C -n -u -U --map-users="$USER_ID",0,1 --map-users="$subuid_id",1,"$subuid_count" --map-groups="$GROUP_ID",0,1 --map-groups="$subgid_id",1,"$subgid_count" "$0" ns_init "$CONTAINER_NAME" "$network_ready" &
 
   container_pid=$!
   echo "[*] Container PID: $container_pid"
@@ -106,10 +106,19 @@ ns_init() {
   echo "[*] Setting up rootfs"
 
   mount --make-rprivate /
-  mount --bind "$ROOTFS" "$ROOTFS"
+
+  #echo '[*] pre-mounting sysfs'
+  #mkdir -p /tmp/newsys
+  #mount -t sysfs -o nosuid,nodev,noexec,relatime sysfs /tmp/newsys
+
+  mkdir -p "$ROOTFS/sys"
+  mount -t sysfs -o nosuid,nodev,noexec,relatime sysfs "$ROOTFS/sys"
+
+  mount --rbind "$ROOTFS" "$ROOTFS"
   cd "$ROOTFS"
 
   mkdir -p ./oldroot
+  echo '[*] PIVOT_ROOT'
   pivot_root . ./oldroot
 
   export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -119,11 +128,15 @@ ns_init() {
   mkdir -p /proc
   mount --move /oldroot/proc /proc
 
-  echo "--- debug ---"
-  id
-  cat /oldroot/proc/self/uid_map 2>/dev/null
-  cat /oldroot/proc/self/status 2>/dev/null | grep Cap
-  echo "-------------"
+  #echo '[*] relocating sysfs mount into new root'
+  #mkdir -p /sys
+  #mount --move /oldroot/tmp/newsys /sys
+
+  #echo "--- debug ---"
+  #id
+  #cat /oldroot/proc/self/uid_map 2>/dev/null
+  #cat /oldroot/proc/self/status 2>/dev/null | grep Cap
+  #echo "-------------"
 
   umount -l /oldroot
   rmdir /oldroot
