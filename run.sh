@@ -84,7 +84,7 @@ do_run() {
 
   set -m
 
-  unshare --mount --pid --fork --mount-proc --ipc -C -n -u -U --map-users="$USER_ID",0,1 --map-users="$subuid_id",1,"$subuid_count" --map-groups="$GROUP_ID",0,1 --map-groups="$subgid_id",1,"$subgid_count" "$0" ns_init "$CONTAINER_NAME" "$network_ready" &
+  unshare --mount --pid --fork --ipc -C -n -u -U --map-users="$USER_ID",0,1 --map-users="$subuid_id",1,"$subuid_count" --map-groups="$GROUP_ID",0,1 --map-groups="$subgid_id",1,"$subgid_count" "$0" ns_init "$CONTAINER_NAME" "$network_ready" &
 
   container_pid=$!
   echo "[*] Container PID: $container_pid"
@@ -111,7 +111,8 @@ ns_init() {
   #mkdir -p /tmp/newsys
   #mount -t sysfs -o nosuid,nodev,noexec,relatime sysfs /tmp/newsys
 
-  mkdir -p "$ROOTFS/sys"
+  mkdir -p "$ROOTFS/proc" "$ROOTFS/sys"
+  mount -t proc -o nosuid,nodev,noexec,relatime proc "$ROOTFS/proc"
   mount -t sysfs -o nosuid,nodev,noexec,relatime sysfs "$ROOTFS/sys"
 
   mount --rbind "$ROOTFS" "$ROOTFS"
@@ -124,9 +125,9 @@ ns_init() {
   export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
   hash -r
 
-  echo '[*] relocating proc mount (from --mount-proc) into new root'
-  mkdir -p /proc
-  mount --move /oldroot/proc /proc
+  #echo '[*] relocating proc mount (from --mount-proc) into new root'
+  #mkdir -p /proc
+  #mount --move /oldroot/proc /proc
 
   #echo '[*] relocating sysfs mount into new root'
   #mkdir -p /sys
