@@ -115,15 +115,32 @@ ns_init() {
   export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
   hash -r
 
+  echo '[*] relocating proc mount (from --mount-proc) into new root'
+  mkdir -p /proc
+  mount --move /oldroot/proc /proc
+
+  echo "--- debug ---"
+  id
+  cat /oldroot/proc/self/uid_map 2>/dev/null
+  cat /oldroot/proc/self/status 2>/dev/null | grep Cap
+  echo "-------------"
+
   umount -l /oldroot
   rmdir /oldroot
 
+  #echo '[*] mounting proc'
   #mount -t proc proc /proc
+  #mount -t proc -o nosuid,nodev,noexec,relatime proc /proc
+  #echo '[*] mounting sys'
   #mount -t sysfs sys /sys
+  #mount -t sysfs -o nosuid,nodev,noexec,relatime sys /sys
 
+  #echo '[*] mounting dev'
   #mount -t tmpfs tmpfs /dev
   #mkdir -p /dev/pts /dev/shm
+  #echo '[*] mounting pts'
   #mount -t devpts devpts /dev/pts
+  #echo '[*] mounting shm'
   #mount -t tmpfs tmpfs /dev/shm
 
   #mknod -m 666 /dev/null c 1 3
