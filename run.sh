@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 usage() {
-  echo "Usage: $0 <install|run> <container-name>"
+  echo "Usage: $0 <install|run|remove> <container-name>"
   exit 1
 }
 
@@ -88,6 +88,7 @@ do_run() {
 
   container_pid=$!
   echo "[*] Container PID: $container_pid"
+  echo "$container_pid" >"$CONTAINER_DIR/container.pid"
   setup_container_network "$container_pid"
   touch "$network_ready"
   fg %1
@@ -203,6 +204,41 @@ setup_container_network() {
   echo "[4] Done"
 }
 
+do_remove() {
+  echo "[*] Removing container $CONTAINER_NAME"
+
+  # Refuses to remove the container that is still running
+  local pidfile="$CONTAINER_DIR/container.pid"
+  if [[ -f "$pidfile" ]]; then
+    local old_pid
+    old_pid=$(cat "$pidfile")
+    if kill -0 "$old_pid" 2>/dev/null; then
+      echo "[!] Container $CONTAINER_NAME still running (pid $old_pid). Exit it first." >&2
+      exit 1
+    fi
+  fi
+
+  # Removing the veth paris
+  local veth="conveth-$CONTAINER_NAME"
+  if ip link show "$veth" &>/dev/null; then
+    echo "[*] Removing veth $veth"
+    sudo ip link del "$veth" 2>/dev/null || true
+  fi
+
+  # Mount
+  if mount | grep -q " on $ROOTFS"; then
+    echo "[*] Unmounting stale mounts under $ROOTFS"
+    sudo umount -Rl "$ROOTFS" 2>/dev/null || true
+  fi
+
+  if [[ -d "$CONTAINER_DIR" ]]; then
+    echo "[*] Deleting $CONTAINER_DIR"
+    sudo rm -rf "$CONTAINER_DIR"
+  fi
+
+  echo "[*] Done"
+}
+
 case "$ACTION" in
 install)
   bootstrap_rootfs
@@ -213,6 +249,9 @@ run)
   ;;
 ns_init)
   ns_init "$@"
+  ;;
+remove)
+  do_remove
   ;;
 *)
   usage
