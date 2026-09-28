@@ -1,0 +1,299 @@
+#!/usr/bin/env bash
+readonly BASE_DIR="$HOME/.conruntime"
+readonly IMAGE_URL="https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86_64/alpine-minirootfs-3.19.1-x86_64.tar.gz"
+readonly BRIDGE="myconbr0"
+readonly BR_CIDR="10.0.0.1/24"
+readonly BR_IP="10.0.0.1"
+readonly SUBNET="10.0.0.0/24"
+readonly OUT_IFACE="wlan0"
+
+# Usage
+usage() {
+  echo "Usage: $0 <install|uninstall|create|start|remove> <name>" >&2
+  exit 1
+}
+
+# Setup Runtime
+setup_runtime() {
+  # Setup Bridge
+  # Enabling IP Forwarding
+  # NAT Masquerade
+
+  # Setup Bridge and Set IP Address
+  if ! ip link show "$BRIDGE" >&/dev/null; then
+    sudo ip link add "$BRIDGE" type bridge
+  fi
+  sudo ip addr replace "$BR_CIDR" dev "$BRIDGE"
+  sudo ip link set "$BRIDGE" up
+
+  # Enable IP Forwarding
+  sudo sysctl -qw net.ipv4.ip_forward=1
+
+  # NAT Masquerade
+  if ! sudo iptables -t nat -C POSTROUTING -s "$SUBNET" -o "$OUT_IFACE" -j MASQUERADE >&/dev/null; then
+    sudo iptables -t nat -A POSTROUTING -s "$SUBNET" -o "$OUT_IFACE" -j MASQUERADE
+  fi
+}
+
+# Uninstall
+cleanup_runtime() {
+  sudo iptables -t nat -D POSTROUTING -s "$SUBNET" -o "$OUT_IFACE" -j MASQUERADE 2>/dev/null
+  sudo ip link del "$BRIDGE" 2>/dev/null
+}
+
+# Removing the container
+remove_con() {
+  # Check if the container is running
+  # Remove veth pairs (should already been removed when we exists the shell)
+  # Unmount and remove the container directory
+
+  local con_name="$1"
+
+  # Check if the container exists
+  [[ -d "$BASE_DIR/$con_name/rootfs" ]] || {
+    echo "The container $con_name does not exists" >&2
+    exit 1
+  }
+
+  # Check if the container is running
+  local conpid_file="$BASE_DIR/$con_name/.pid"
+  if [[ -f "$conpid_file" ]]; then
+    local old_pid=$(cat "$conpid_file")
+    if kill -0 "$old_pid" 2>/dev/null; then
+      echo "[-] The $con_name still running(pid: $old_pid). Exit it first" >&2
+      exit 1
+    fi
+  fi
+
+  # Remove the veth pair (in case they still exist)
+  sudo ip link del "$con_name-br" 2>/dev/null
+
+  # Unmount and remove the container directory
+  local rootfs="$BASE_DIR/$con_name/rootfs"
+  if mount | grep -q " on $rootfs"; then
+    echo "[*] Unmounting stale mount under $rootfs"
+    sudo umount -Rl "$rootfs" 2>/dev/null
+  fi
+
+  if [[ -d "$BASE_DIR/$con_name" ]]; then
+    echo "[*] Removing container directory"
+    sudo rm -rf "$BASE_DIR/$con_name"
+  fi
+  echo "[+] Removed!"
+}
+
+# Create Container
+create_con() {
+  # Download the base filesystem
+  # Create the container directory $HOME/.conruntime/$name
+  # Extract it under $BASE_DIR/$con_name
+
+  # Arguments
+  local con_name="$1"
+
+  # Validate the name
+  [[ $con_name =~ ^[a-zA-Z0-9_-]{1,12}$ ]] || {
+    echo "[-] Name must be 1-12 characters, digits, _ or -" >&2
+    exit 1
+  }
+
+  # Check if the container exists
+  [[ -d "$BASE_DIR/$con_name/rootfs" ]] && { echo "Container[$con_name] already exists" >&2 && exit 1; }
+
+  # Download the base file system
+  mkdir -p "$BASE_DIR/$con_name/rootfs"
+  curl -fL -o "$BASE_DIR/$con_name/basefs.tar.gz" "$IMAGE_URL" || {
+    rm -rf "$BASE_DIR/$con_name/rootfs"
+    return 1 # this prevents tar from running if downloading goes wrong
+  }
+
+  # Extract
+  tar -zxf "$BASE_DIR/$con_name/basefs.tar.gz" -C "$BASE_DIR/$con_name/rootfs" || {
+    rm -rf "$BASE_DIR/$con_name/rootfs"
+    return 1
+  }
+
+}
+
+# Run Container
+start_con() {
+  # Check if the container exists before starting it
+  # create mkfifo
+  # setup_netns (background)
+  # unshare
+  # mount procfs and sysfs
+  # rbind mount
+  # pivot_root
+  # notify mkfifo
+
+  local con_name="$1"
+  local fifo="$BASE_DIR/$con_name/network-ready"
+  local conpid_file="$BASE_DIR/$con_name/.pid"
+
+  # Check if the container exists before starting it
+  [[ -d "$BASE_DIR/$con_name/rootfs" ]] || { echo "Container $con_name does not exist yet" >&2 && exit 1; }
+
+  # Retrieve the current user's subuids and subgids for the user namespace
+  local subuid_id=$(cat /etc/subuid | grep "^$USER:" | cut -d: -f2)
+  local subuid_count=$(cat /etc/subuid | grep "^$USER:" | cut -d: -f3)
+  local subgid_id=$(cat /etc/subgid | grep "^$USER:" | cut -d: -f2)
+  local subgid_count=$(cat /etc/subgid | grep "^$USER:" | cut -d: -f3)
+  if [[ -z "$subuid_id" || -z "$subgid_id" ]]; then
+    echo "[-] No /etc/subuid or /etc/subgid entry" >&2
+    exit 1
+  fi
+
+  # Export the pid as a file
+  echo "$$" >"$conpid_file"
+  # Create a named pipe
+  rm -f "$fifo" && mkfifo "$fifo"
+
+  # Setup Netns
+  mkdir -p "$BASE_DIR/$con_name/logs"
+  sudo -v # reset sudo timeout before backgrounding the process that needs root prviledge
+  (setup_netns "$con_name" "$$" "$fifo" >"$BASE_DIR/$con_name/logs/helper.log" 2>&1 &)
+
+  # Run unshare
+  exec unshare \
+    --mount --pid --fork \
+    --net --uts --ipc \
+    --user \
+    --map-users="$(id -u)",0,1 \
+    --map-users="$subuid_id",1,"$subuid_count" \
+    --map-groups="$(id -g)",0,1 \
+    --map-groups="$subgid_id",1,"$subgid_count" \
+    "$0" init "$con_name" "$fifo"
+
+}
+
+# Helper: Setup Container Network (called by `start_con`)
+setup_netns() {
+
+  # create veth pairs and connect br end
+  # notify with mkfifo
+  # connect ns end
+  # set addresses
+  # keep checking if the netns has changed
+  # if changed write(notify) to named pipe
+
+  local con_name="$1"
+  local con_pid="$2"
+  local fifo="$3"
+
+  local veth_ns_end="$con_name-ns"
+  local veth_br_end="$con_name-br"
+
+  # Create veth pairs and connect the br end
+  if ! ip link show "$veth_ns_end" >/dev/null 2>&1; then
+    sudo -n ip link add name "$veth_ns_end" type veth peer name "$veth_br_end"
+  fi
+  sudo -n ip link set "$veth_br_end" master "$BRIDGE"
+
+  # Wait until the namespace is created
+  local host_netns
+  host_netns=$(readlink /proc/self/ns/net)
+  while [[ $(readlink /proc/"$con_pid"/ns/net) == "$host_netns" ]]; do
+    sleep 0.05
+  done
+
+  if {
+    # Add the other end to the netns (once the netns is ready)
+    sudo -n ip link set "$veth_ns_end" netns "$con_pid" &&
+
+      # Set Address inside the new netns: The address needs rotation
+      sudo -n nsenter -t "$con_pid" -n ip addr replace 10.0.0.2/24 dev "$veth_ns_end" &&
+      sudo -n nsenter -t "$con_pid" -n ip link set "$veth_ns_end" up &&
+      sudo -n nsenter -t "$con_pid" -n ip link set lo up &&
+      sudo -n nsenter -t "$con_pid" -n ip route add default via "$BR_IP" &&
+      sudo -n ip link set "$veth_br_end" up
+  }; then
+    echo 'ready' >"$fifo" # Notify `ns_init` ready so that it can continue
+  else
+    echo 'failed' >"$fifo" # Send the failed message to continer's init(`ns_init`)
+  fi
+
+}
+
+# The init process inside the new namespace
+ns_init() {
+  # mkfifo read end (netns ready confirmed)
+  # mount proc sys
+  # rbind
+  # pivot_root
+
+  local con_name="$1"
+  local fifo="$2"
+  local rootfs="$BASE_DIR/$con_name/rootfs"
+
+  # Wait for the netns to finish setting up
+  local status
+  read -r status <"$fifo"
+  if [[ "$status" != 'ready' ]]; then
+    echo "[-] Network setup failed!" >&2
+    exit 1
+  fi
+
+  # Mount Propagation
+  mount --make-rprivate /
+
+  # Mount proc and sysfs
+  mkdir -p "$rootfs/proc" "$rootfs/sys"
+  mount -t proc proc "$rootfs/proc"
+  mount -t sysfs sys "$rootfs/sys"
+
+  # Bind mount rootfs itself (required by `pivot_root`)
+  mount --rbind "$rootfs" "$rootfs"
+  mkdir -p "$rootfs/.oldroot"
+
+  # pivot_root
+  pivot_root "$rootfs" "$rootfs/.oldroot"
+  cd / # refresh the working directory
+
+  # PATH
+  export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  hash -r # clears the commands' cache (force them to look up this new PATH)
+
+  # Unmount and remove the host's rootfs
+  umount -l /.oldroot
+  rmdir /.oldroot
+
+  # Drop into the shell
+  export HOME=/root
+  exec /bin/sh
+
+}
+
+# Argument check
+case $1 in
+install | uninstall)
+  (($# >= 1)) || usage
+  ;;
+*)
+  (($# >= 2)) || usage
+  ;;
+esac
+
+# Action
+case "$1" in
+"install")
+  setup_runtime
+  ;;
+"uninstall")
+  cleanup_runtime
+  ;;
+"create")
+  create_con "$2" # Pass container name
+  ;;
+"start")
+  start_con "$2" # Pass container name
+  ;;
+"remove")
+  remove_con "$2" # Pass container name
+  ;;
+"init")
+  ns_init "$2" "$3" # Not supposed to be called directly by the user
+  ;;
+*)
+  usage
+  ;;
+esac
