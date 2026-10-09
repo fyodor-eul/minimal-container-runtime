@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 readonly BASE_DIR="$HOME/.conruntime"
-readonly IMAGE_URL="https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86_64/alpine-minirootfs-3.19.1-x86_64.tar.gz"
-readonly BRIDGE="myconbr0"
-readonly BR_CIDR="10.0.0.1/24"
-readonly BR_IP="10.0.0.1"
-readonly SUBNET="10.0.0.0/24"
-readonly OUT_IFACE="wlan0"
+readonly IMAGE_URL='https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86_64/alpine-minirootfs-3.19.1-x86_64.tar.gz'
+readonly BRIDGE='myconbr0'
+readonly BR_CIDR='10.0.0.1/24'
+readonly BR_IP='10.0.0.1'
+readonly OUT_IFACE='wlan0'
+readonly SUBNET='10.0.0.0/24'
+
+# Control Group Constants
+readonly CG_ROOT='/sys/fs/cgroup/conruntime'
+readonly MEM_MAX='256M'
+readonly PIDS_MAX='64'
+readonly CPU_MAX='50000 100000' # 50ms per 100ms = half a CPU
 
 # Usage
 usage() {
@@ -18,6 +24,7 @@ setup_runtime() {
   # Setup Bridge
   # Enabling IP Forwarding
   # NAT Masquerade
+  # Create the Parent cgroup
 
   # Setup Bridge and Set IP Address
   if ! ip link show "$BRIDGE" >&/dev/null; then
@@ -33,12 +40,24 @@ setup_runtime() {
   if ! sudo iptables -t nat -C POSTROUTING -s "$SUBNET" -o "$OUT_IFACE" -j MASQUERADE >&/dev/null; then
     sudo iptables -t nat -A POSTROUTING -s "$SUBNET" -o "$OUT_IFACE" -j MASQUERADE
   fi
+
+  # Create the Parent cgroup
+  sudo mkdir -p "$CG_ROOT"
+  # make sure the required controllers(cpu, memory and pids) are enable
+  echo '+cpu +memory +pids' | sudo tee /sys/fs/cgroup/cgroup.subtree_control >/dev/null
+  echo '+cpu +memory +pids' | sudo tee "$CG_ROOT"/cgroup.subtree_control >/dev/null
 }
 
 # Uninstall
 cleanup_runtime() {
+  # Remove iptables rule
   sudo iptables -t nat -D POSTROUTING -s "$SUBNET" -o "$OUT_IFACE" -j MASQUERADE 2>/dev/null
+
+  # Remove the bridge
   sudo ip link del "$BRIDGE" 2>/dev/null
+
+  # Remove the Parent Cgroup
+  sudo rmdir "$CG_ROOT" 2>/dev/null
 }
 
 # Removing the container
@@ -46,6 +65,7 @@ remove_con() {
   # Check if the container is running
   # Remove veth pairs (should already been removed when we exists the shell)
   # Unmount and remove the container directory
+  # Remove cgroup
 
   local con_name="$1"
 
@@ -75,6 +95,11 @@ remove_con() {
     sudo umount -Rl "$rootfs" 2>/dev/null
   fi
 
+  # Remove Cgroups
+  # cgroups are removed with rmdir
+  [[ -d "$CG_ROOT/$con_name" ]] && sudo rmdir "$CG_ROOT/$con_name"
+
+  # Remove the Container Directory
   if [[ -d "$BASE_DIR/$con_name" ]]; then
     echo "[*] Removing container directory"
     sudo rm -rf "$BASE_DIR/$con_name"
@@ -130,6 +155,12 @@ start_con() {
   local fifo="$BASE_DIR/$con_name/network-ready"
   local conpid_file="$BASE_DIR/$con_name/.pid"
 
+  [[ -d "$CG_ROOT" ]] || {
+    echo "[-] Run '$0 install' first" >&2
+    exit 1
+  }
+  local cg="$CG_ROOT/$con_name"
+
   # Check if the container exists before starting it
   [[ -d "$BASE_DIR/$con_name/rootfs" ]] || { echo "Container $con_name does not exist yet" >&2 && exit 1; }
 
@@ -152,6 +183,13 @@ start_con() {
   mkdir -p "$BASE_DIR/$con_name/logs"
   sudo -v # reset sudo timeout before backgrounding the process that needs root prviledge
   (setup_netns "$con_name" "$$" "$fifo" >"$BASE_DIR/$con_name/logs/helper.log" 2>&1 &)
+
+  # Cgroups
+  sudo mkdir -p "$cg"
+  echo "$MEM_MAX" | sudo tee "$cg/memory.max" >/dev/null
+  echo "$PIDS_MAX" | sudo tee "$cg/pids.max" >/dev/null
+  echo "$CPU_MAX" | sudo tee "$cg/cpu.max" >/dev/null
+  echo "$$" | sudo tee "$cg/cgroup.procs" >/dev/null
 
   # Run unshare
   exec unshare \
